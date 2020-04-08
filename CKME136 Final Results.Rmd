@@ -1,0 +1,493 @@
+---
+title: "Changes in Consumer Credit - CKME136 Final Results"
+output: github_document
+author: Daniel Christian 
+---
+
+# 1. Initial Dataset Preparation
+
+Required packages:
+```{r}
+library('rio')
+library('ggplot2')
+library('forecast')
+library('tseries')
+options(scipen = 999)
+```
+
+
+
+Three datasets from Statistics Canada and the BOC were used to explore consumer debt:
+
+## Debt Service Indicators
+
+[Debt service indicators of households](www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1110006501)
+```{r}
+debt = read.csv("Debt.csv")
+debt1 = within(debt, rm(GEO, DGUID, UOM, UOM_ID, SCALAR_FACTOR, SCALAR_ID, VECTOR, COORDINATE, STATUS, SYMBOL, TERMINATED, DECIMALS))
+colnames(debt1) = c("Date", "Adjustment", "Estimates", "Value")
+unique(debt1$Estimates)
+debt1$Estimates = factor(debt1$Estimates, levels = c("Household income", "Compensation of employees", "Net mixed income", "Property income received", "Current transfers received", "Household outlays", "Property income paid", "Current transfers paid", "Household final consumption expenditure", "Disposable income", "Plus: Interest paid", "Equals: disposable income before payment of interest", "Total debt payments", "Mortgage debt payments", "Non-mortgage debt payments", "Total obligated payments of principal", "Obligated mortgage principal payments", "Obligated non-mortgage principal payments", "Total interest paid", "Mortgage interest paid", "Non-mortgage interest paid", "Of which: consumer debt", "Debt service ratio", "Mortgage debt service ratio", "Non-mortgage debt service ratio", "Debt service ratio, interest only", "Mortgage debt service ratio, interest only", "Non-mortgage debt service ratio, interest only", "Of which: consumer debt service ratio, interest only"))
+debt1$Estimates[10] = "Disposable income"
+debt1$Estimates[22] = "Of which: consumer debt"
+debt1$Date = as.Date(paste(debt1$Date, "-01", sep = ""))
+View(debt1)
+
+#Filters to separate estimates by 'Adjustment', this will be used later on. 
+adfiltera = "Seasonally adjusted at annual rates"
+adfilteru = "Unadjusted"
+
+```
+
+The Debt Service Indicators dataset categorizes debt in the Canadian economy from 1990-2019. Major debt components within include mortgage, credit, and interest debt. Initial cleaning of the dataset involved removing unnecessary columns, splitting the 'Estimates' attribute into its many components (as a factor), and converting the date column to a date object and adding a day value (the first of the month was used as a placeholder).  
+
+
+
+## Financial Indicators
+
+[Financial indicators, quarterly, 1990 - 2012](www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=3610001001)
+
+```{r}
+financial = read.csv("Financial.csv")
+financial1 = within(financial, rm(GEO, DGUID, UOM, UOM_ID, SCALAR_FACTOR, SCALAR_ID, VECTOR, COORDINATE, STATUS, SYMBOL, TERMINATED, DECIMALS))
+colnames(financial1) = c("Date", "Estimates", "Value")
+unique(financial1$Estimates)
+financial1$Estimates = factor(financial1$Estimates, levels = c("Debt to gross domestic product (GDP)", "Debt to personal disposable income", "Credit market debt to personal disposable income", "Consumer credit and mortgage liabilities to personal disposable income", "Net worth as a percentage of personal disposable income", "Debt to total assets", "Debt to net worth", "Credit market debt to net worth", "Consumer credit and mortgage liabilities to net worth", "Total assets to net worth", "Financial assets to net worth", "Financial assets to non-financial assets", "Owner's equity as a percentage of real estate", "Real estate as a percentage of personal disposable income"))
+financial1$Date = as.Date(paste(financial1$Date, "-01", sep = ""))
+View(financial1)
+```
+
+The Financial Indicators dataset provides various ratios of debt to assets and networth, indicating the sustainability of various kinds of debt from 1990-2012. Inital cleaning of this dataset included removing non-essential attributes and creating a factor attribute to categorize different Estimates. The date attribute also needed similar fixes to the Debt Service Indicator's. 
+
+
+
+## Credit Measures
+[Credit measures, Bank of Canada](www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1010011801)
+
+```{r}
+Credit = read.csv("Credit.csv")
+credit1 = within(Credit, rm(GEO, DGUID, UOM, UOM_ID, SCALAR_FACTOR, SCALAR_ID, VECTOR, COORDINATE, STATUS, SYMBOL, TERMINATED, DECIMALS))
+credit1$Type.of.credit = factor(credit1$Type.of.credit, levels = c("Total business and household credit", "Household credit", "Residential mortgage credit", "Consumer credit", "Business credit", "Other business credit", "Short-term business credit"))
+colnames(credit1) = c("Date", "Type of credit", "Adjustment", "Value")
+unique(credit1$`Type of credit`)
+credit1$Date = as.Date(paste(credit1$Date, "-01", sep = ""))
+adcreditfiltera = "Seasonally adjusted"
+#the adjustment column has differently phrased values warranting a different filter
+credit1_a = credit1[credit1$Adjustment %in% adcreditfiltera,]
+credit1_a = within(credit1_a, rm("Adjustment"))
+View(credit1_a)
+```
+
+From the statscan/BOC dataset "Credit Measures". The data spans a 51 year period from 1969-2020. Both household and consumer credit levels are measured over time, allowing the analysis of long term trends for use in the predictive model.
+
+***
+
+
+
+
+
+# 2. Consumer Debt Breakdown
+                                  
+Let's take a look at the different components of Canadian debt:
+
+## A historical look at total consumer debt
+
+```{r}
+#Total Debt Payments of households from the Debt Service Indicators Dataset
+tdfilter = "Total debt payments"
+Total_debt_payments = debt1[debt1$Estimates %in% tdfilter,]
+Total_debt_payments = within(Total_debt_payments, rm("Estimates"))
+Total_debt_payments_a = Total_debt_payments[Total_debt_payments$Adjustment %in% adfiltera,]
+Total_debt_payments_a = within(Total_debt_payments_a, rm("Adjustment"))
+tdplot_a = plot(Total_debt_payments_a$Date, Total_debt_payments_a$Value, xlab = "Date", ylab = "Amount", main = "Total Debt Payment 1990-2020, Seasonally Adjusted", col = "red", type = "l")
+hist(Total_debt_payments_a$Value, probability = TRUE, main = "Pdf of Total Debt, 1990-2020", xlab = "Debt Level")
+lines(density(Total_debt_payments_a$Value), col = "red")
+```
+
+The overall trend shows rising levels of debt payments over time. A spike followed by a recession during 2008 can be explained by the financial crisis. The period between 2005-2010 is one to keep in mind for future analysis. A probability distribution of total debt values shows a skew to the right. In addition to the rising debt trend, the pdf suggests that historical debt values stayed around the same values for longer periods of time than they do currently. 
+
+
+Plots of mortgage debt vs non-mortgage (mainly credit) debt:
+
+```{r}
+#Mortgage debt payments of households 
+mdfilter = "Mortgage debt payments"
+Mortgage_debt_payments = debt1[debt1$Estimates %in% mdfilter,]
+Mortgage_debt_payments = within(Mortgage_debt_payments, rm("Estimates"))
+Mortgage_debt_payments_a = Mortgage_debt_payments[Mortgage_debt_payments$Adjustment %in% adfiltera,]
+Mortgage_debt_payments_a = within(Mortgage_debt_payments_a, rm("Adjustment"))
+
+
+#Non-mortgage debt payments of households 
+nmdfilter = "Non-mortgage debt payments"
+nonmortgage_debt_payments = debt1[debt1$Estimates %in% nmdfilter,]
+nonmortgage_debt_payments = within(nonmortgage_debt_payments, rm("Estimates"))
+nonmortgage_debt_payments_a = nonmortgage_debt_payments[nonmortgage_debt_payments$Adjustment %in% adfiltera,]
+nonmortgage_debt_payments_a = within(nonmortgage_debt_payments_a, rm("Adjustment"))
+
+
+par(mfrow = c(1,2))
+plot(Mortgage_debt_payments_a$Date, Mortgage_debt_payments_a$Value, xlab = "Date", ylab = "Amount", main = "Mortgage Debt 1990-2020, SA", col = "red", type = "l")
+plot(nonmortgage_debt_payments_a$Date, nonmortgage_debt_payments_a$Value, xlab = "Date", ylab = "Amount", main = "Non-mortgage Debt 1990-2020, SA", col = "red", type = "l")
+```
+
+Both plots have similar trends, with a notable exception around 2015 in non-mortgage debt in the form of a breif spike. A visualization comparing all three attributes:
+
+```{r}
+#Putting all of the attributes together, compare
+colnames(Total_debt_payments_a) = c("Date", "Total Debt Payments")
+colnames(Mortgage_debt_payments_a) = c("Date", "Mortgage Debt Payments")
+colnames(nonmortgage_debt_payments_a) = c("Date", "Non-mortgage Debt Payments")
+Debt_breakdown = merge(x = Total_debt_payments_a, y = Mortgage_debt_payments_a, by = "Date", all.y = TRUE)
+Debt_breakdown = merge(x = Debt_breakdown, y = nonmortgage_debt_payments_a, by = "Date", all.y = TRUE)
+plot(Debt_breakdown$`Total Debt Payments`, type = "l", ylim = c(20000, 250000), col = "red", xlab = "Date", ylab = "Amount", main = "Overall Debt Breakdown", xaxt = "n")
+axis(1, at=1:length(Debt_breakdown$Date), labels = Debt_breakdown$Date)
+lines(Debt_breakdown$`Mortgage Debt Payments`, col = "blue", type = "l")
+lines(Debt_breakdown$`Non-mortgage Debt Payments`, col = "green", type = "l")
+legend("topleft", legend = c("Total Debt Payments", "Mortgage Debt", "Non-mortgage Debt"), lty = 1, lwd = 2, pch = 21, col = c("red", "blue", "green"), ncol = 2, bty = "n", cex = 0.8, text.col = c("red", "blue", "green"), inset = 0.01)
+summary(Debt_breakdown)
+```
+
+From the data above it appears that over the past several decades credit debt has risen at a faster rate than mortgage debt, and so today makes up a larger portion of total household debt. Median levels of non-mortgage debt payments account for almost double those of mortgage debt payments. 
+An interesting note here is that around 2008, both credit and mortgage debt hit a sudden peak due to the financial crisis (not only mortgage debt as much of the literature seems to focus on).
+
+
+
+
+## Debt/ Net worth ratios over time
+
+An important indicator of the burden that debt has on the economy is the debt/net worth ratio. Below are several plots that show a historical look at ratios over time, as well as a probability distribution function in order to see how the majority of the population is fairing:
+
+```{r}
+#Total debt to net worth ratio 
+dnwfilter = "Debt to net worth"
+debt_networth_ratio = financial1[financial1$Estimates %in% dnwfilter,]
+debt_networth_ratio = within(debt_networth_ratio, rm("Estimates"))
+colnames(debt_networth_ratio) = c("Date", "Total Debt/Networth Ratio")
+plot(debt_networth_ratio$Date, debt_networth_ratio$`Total Debt/Networth Ratio`, xlab = "Date", ylab = "Ratio", main = "Total Debt to Net Worth Ratio, 1990-2012", type = "l", col = "red")
+hist(debt_networth_ratio$`Total Debt/Networth Ratio`, probability = TRUE, main = "Pdf of Debt/Net Worth Ratio 1990-2012", xlab = "Ratio")
+lines(density(debt_networth_ratio$`Total Debt/Networth Ratio`), col = "red")
+```
+
+Historical debt/net worth ratios range between ~20-25%, in other words meaning that the average Canadian consumer holds at any given time a debt level that encompasses 1/5 - 1/4 of their net worth. Taking a closer look at the most recent decade available: 
+
+```{r}
+nwr_2001_2012 = debt_networth_ratio[debt_networth_ratio$Date >= "2001-01-01" & debt_networth_ratio$Date <= "2012-01-01",]
+hist(nwr_2001_2012$`Total Debt/Networth Ratio`, probability = TRUE, main = "Pdf of Debt/Net Worth Ratio 2001-2012", xlab = "Ratio")
+lines(density(nwr_2001_2012$`Total Debt/Networth Ratio`), col = "red")
+```
+
+More consumers fall into the 20-22% range, with another spike at 24-25%. The overall trend remains upward. 
+
+```{r}
+#credit debt to net worth ratio 
+cdnwfilter = "Credit market debt to net worth"
+credit_networth_ratio = financial1[financial1$Estimates %in% cdnwfilter,]
+credit_networth_ratio = within(credit_networth_ratio, rm("Estimates"))
+colnames(credit_networth_ratio) = c("Date", "Credit/Networth Ratio")
+
+#credit and mortgage debt to net worth ratio 
+cmnwfilter = "Consumer credit and mortgage liabilities to net worth"
+creditm_networth_ratio = financial1[financial1$Estimates %in% cmnwfilter,]
+creditm_networth_ratio = within(creditm_networth_ratio, rm("Estimates"))
+colnames(creditm_networth_ratio) = c("Date", "Credit/mortgage to Net worth")
+
+par(mfrow = c(1,2))
+plot(credit_networth_ratio$Date, credit_networth_ratio$`Credit/Networth Ratio`, xlab = "Date", ylab = "Ratio", main = "Credit Net Worth Ratio", type = "l", col = "red")
+plot(debt_networth_ratio$Date, debt_networth_ratio$`Total Debt/Networth Ratio`, xlab = "Date", ylab = "Ratio", main = "Credit and Mortgage to Net Worth", type = "l", col = "red")
+```
+These plots breakdown the components of the debt/ net worth ratio attributes. Both plots show similar rising trends with ratios reaching over 25% at their most recent points. 
+
+## An overall look at net worth breakdown:
+```{r}
+#Putting all of the attributes together, compare
+Networth_breakdown = merge(x = debt_networth_ratio, y = credit_networth_ratio, by = "Date", all.y = TRUE)
+Networth_breakdown = merge(x = Networth_breakdown, y = creditm_networth_ratio, by = "Date", all.y = TRUE)
+
+plot(Networth_breakdown$`Total Debt/Networth Ratio`, type = "l", ylim = c(15, 30), col = "red", xlab = "Date", ylab = "Ratio", main = "Net Worth Breakdown, 1990-2012", xaxt = "n")
+axis(1, at=1:89, labels = Networth_breakdown$Date)
+lines(Networth_breakdown$`Credit/Networth Ratio`, col = "blue", type = "l")
+lines(Networth_breakdown$`Credit/mortgage to Net worth`, col = "green", type = "l")
+legend("topleft", legend = c("Total Debt/Networth Ratio", "Credit/Networth Ratio", "Credit+Mortgage/Networth Ratio"), lty = 1, lwd = 2, pch = 21, col = c("red", "blue", "green"), ncol = 2, bty = "n", cex = 0.8, text.col = c("red", "blue", "green"), inset = 0.01)
+```
+As the above data shows, debt to networth ratios are at their highest since the 1990s, with a median level of about 20%. Interestingly, mortgages make up a much more sizeable shift in the curve downwards once taken into ratio consideration (the green curve).
+
+
+## Debt Breakdown Results
+
+Consumer debt trends are rising across Canada.Over the past decade non-mortgage debt has risen to higher levels than mortgage debt. According to historical debt service ratios, consumers over the past 2 decades have been allocating more of their income to servicing credit debt, while credit card debt represents an increasingly larger portion of their overall net worth.
+
+Exploring the data suggests that credit debt is the most important candidate for later predictive modeling.
+***
+
+
+
+
+
+# 3. Credit Market Data
+                                         
+## Looking at the attributes:
+```{r}
+unique(credit1_a$`Type of credit`)
+```
+There are two attributes of interest; [2]Household credit and [3]Consumer credit (where consumer credit is an individual measure).
+
+## Exploring the attributes
+```{r}
+#Household credit
+hcfilter = "Household credit"
+household_credit = credit1_a[credit1_a$`Type of credit` %in% hcfilter,]
+household_credit = within(household_credit, rm("Type of credit"))
+colnames(household_credit) = c("Date", "Household Credit")
+summary(household_credit$`Household Credit`)
+
+#Consumer credit
+ccfilter = "Consumer credit"
+consumer_credit = credit1_a[credit1_a$`Type of credit` %in% ccfilter,]
+consumer_credit = within(consumer_credit, rm("Type of credit"))
+colnames(consumer_credit) = c("Date", "Consumer Credit")
+summary(consumer_credit$`Consumer Credit`)
+
+#Overall Credit debt 
+Credit_breakdown = merge(x = household_credit, y = consumer_credit, by = "Date", all.y = TRUE)
+plot(Credit_breakdown$`Household Credit`, type = "l", ylim = c(0,2500000), col = "red", xlab = "Date", ylab = "Amount", main = "Consumer Credit Breakdown 1969-2020", xaxt = "n")
+axis(1, at=1:613, labels = Credit_breakdown$Date)
+lines(Credit_breakdown$`Consumer Credit`, col = "blue", type = "l")
+legend("topleft", legend = c("Household Credit", "Consumer Credit"), lty = 1, lwd = 2, pch = 21, col = c("red", "blue"), ncol = 2, bty = "n", cex = 0.8, text.col = c("red", "blue"), inset = 0.01)
+summary(Credit_breakdown)
+
+par(mfrow = c(1,2))
+plot(household_credit$Date, household_credit$`Household Credit`, type = "l", col = "red", xlab = "Date", ylab = "Amount", main = "Household Credit, 1969-2020")
+plot(consumer_credit$Date, consumer_credit$`Consumer Credit`, type = "l", col = "red", xlab = "Date", ylab = "Amount", main = "Consumer Credit, 1969-2020")
+```
+Preparing the data frames for household and consumer credit separately. The plots show similar trends as expected. The growth rate of credit debt seems to have risen after the turn of the century, showing much steeper growth past 2008. Decomposition will be used to take a closer look at this period. This will be used later on:
+```{r}
+cc_2000_2010 = consumer_credit[consumer_credit$Date >= "2000-01-01" & consumer_credit$Date <= "2010-01-01",]
+cc_2000_2010_ts = ts(cc_2000_2010[,c('Consumer Credit')])
+cc_2008_2010 = consumer_credit[consumer_credit$Date >= "2008-01-01" & consumer_credit$Date <= "2010-12-01",]
+cc_2008_2010_ts = ts(cc_2008_2010[,c('Consumer Credit')])
+
+par(mfrow = c(1,2))
+plot(cc_2000_2010, main = "Credit Debt 2000-2010")
+plot(cc_2008_2010, main = "Credit Debt 2008-2010")
+```
+Overall, the impact of the financial crisis in 2008 does not look to be very large. The plots above show a momentary drop in the growth of credit debt in the last months of 2008, but is quickly followed by a period of resurrgence to continue its general upward trend. This would suggest that Canadians buying habits were not significantly affected by the crisis, and in fact continued to spend more following this time period. 
+
+
+
+                                         
+                                         
+# 4. Predictive Modeling
+
+The time series credit data warrants a specialized method of predictive analytics. To decide which method should be used, further exploratory analysis will be conducted.  
+
+## Further Cleaning
+
+Creating a time series object.
+```{r}
+credit_ts = ts(consumer_credit[,c('Consumer Credit')])
+```
+Looking at the data to see if there are outliers, NA values.
+```{r}
+sum(is.na(consumer_credit))
+```
+```{r}
+plot(consumer_credit$Date, consumer_credit$`Consumer Credit`, main = "Uncleaned data", xlab = "Date", ylab = "Credit Amount")
+abline(lm(consumer_credit$`Consumer Credit`~ consumer_credit$Date), col = "blue", lwd = 3, lty= 2)
+```
+Cleaning the data; removing outliers, any NA values. 
+```{r}
+consumer_credit$clean_count = tsclean(credit_ts)
+```
+Plotting the newly cleaned data
+```{r}
+plot(consumer_credit$Date, consumer_credit$clean_count, main = "Cleaned Data", xlab = "Date", ylab = "Credit Amount")
+abline(lm(consumer_credit$clean_count ~ consumer_credit$Date), col = "blue", lwd = 3, lty= 2)
+```
+A monthly and yearly moving average (MA) is generated to compare to the clean data. This generally helps smooth out the noise and emphasizes more long term trends. Not much variability can be seen as plots overlap.
+```{r}
+consumer_credit$cnt_ma = ma(consumer_credit$clean_count, order = 1)
+consumer_credit$cnt_ma12 = ma(consumer_credit$clean_count, order = 12)
+ggplot() +
+  geom_line(data = consumer_credit, aes(x = Date, y = clean_count, colour = "Counts")) +
+  geom_line(data = consumer_credit, aes(x = Date, y = cnt_ma, colour = "Monthly MA")) +
+  geom_line(data = consumer_credit, aes(x = Date, y = cnt_ma12, colour = "Yearly MA")) +
+  ylab('Credit Amount')
+```
+
+## Decomposition - Finding Seasonality and Long Term Trends
+```{r}
+count_ma = ts(na.omit(consumer_credit$cnt_ma), frequency = 12)
+decomp_clean = stl(count_ma, s.window = "periodic")
+deseasonal_cnt = seasadj(decomp_clean)
+plot(decomp_clean)
+```
+The data appears to be highly seasonal with an upward trend over time. Taking a closer look at the time period surrounding the financial crisis in 2008:
+```{r}
+cc_2000_2010$clean_count = tsclean(cc_2000_2010_ts)
+cc_2000_2010$cnt_ma = ma(cc_2000_2010$clean_count, order = 1)
+cc_2000_2010_ma = ts(na.omit(cc_2000_2010$cnt_ma), frequency = 12)
+decomp_2000_2010 = stl(cc_2000_2010_ma, s.window = "periodic")
+plot(decomp_2000_2010)
+```
+From the above plot it can be seen that during this decade the trend of the overall data almost exactly fit the data itself. Taking a closer look at 2008-2010 to see more direct impacts of the crisis:
+```{r}
+cc_2008_2010$clean_count = tsclean(cc_2008_2010_ts)
+cc_2008_2010$cnt_ma = ma(cc_2008_2010$clean_count, order = 1)
+cc_2008_2010_ma = ts(na.omit(cc_2008_2010$cnt_ma), frequency = 12)
+decomp_2008_2010 = stl(cc_2008_2010_ma, s.window = "periodic")
+plot(decomp_2008_2010)
+```
+As previously stated, the trend in the data suggests that consumer preferences were not impacted significantly by this major economic event. 
+
+
+Continuing on with exploration of the full data set. Testing for stationarity to see if data variance and autocorrelation are constant over time. 
+```{r}
+adf.test(count_ma, alternative = "stationary")
+```
+A small Dickey-Fuller value with a high p-value both indicate the data is not stationary.  
+
+
+
+## Autocorrelations and Model Order
+
+Using the ACF function to plot the correlation between the time series and its lags
+```{r}
+acf(count_ma, main = '', lag.max = 60)
+pacf(count_ma, main = '')
+```
+These plots display high levels of autocorrelation and so require more differencing to account for. This will be taken into consideration below.
+
+
+```{r}
+count_d1 = diff(deseasonal_cnt, differences = 2)
+plot(count_d1)
+adf.test(count_d1, alternative = "stationary")
+```
+```{r}
+Acf(count_d1, main = 'ACF for differenced series')
+Pacf(count_d1, main = 'PACF for differenced series')
+```
+From the plots above, autocorrelation is significantly reduced when the amount of differencing is set to 2. At this level of differencing we can reject the null hypothesis of the Dickey-Fuller test and assert the alternate hypothesis of true stationarity. Since the time series is highly seasonal with a strong upward trend, higher levels of differencing are expected to be necessary.
+
+After taking all of these things into consideration, an ARIMA or Autoregressive Integrated Moving Average model seems to be a good fit for the data. Using this model, a univariate time series forecast will be created based on the now stationary dataset.
+
+
+## Fitting the ARIMA Model
+
+Creating an inital model as a baseline
+```{r}
+auto.arima(deseasonal_cnt, seasonal = FALSE)
+```
+This auto model has the values (2,2,3). Taking a look at the ACF/PACF to see if this is optimal:
+```{r}
+arima1 = auto.arima(deseasonal_cnt, seasonal = FALSE)
+tsdisplay(residuals(arima1), lag.max = 45, main = '(2,2,3) Model Residuals')
+accuracy(arima1)
+```
+Baseline model results in a MAPE value of 0.3293888. This can be improved in several ways.
+
+
+The acf graphs are showing lags at 6 instead of the auto suggested q value of 3. According to previous acf tests the lag order should be 8. Accounting for this should improve accuracy:
+```{r}
+arima2 = arima(deseasonal_cnt, order = c(2,2,8)) #lag order of 8 shows significant MAPE difference over 6
+arima2
+accuracy(arima2)
+tsdisplay(residuals(arima2), lag.max = 45, main = 'Seasonal Model Residuals')
+```
+It seems that a model with (p,d,q) values found through previous testing results in lower MAPE values than the auto model. 
+
+Seeing what this model would forecast for the next 10 years:
+```{r}
+arima_fcast = forecast(arima2, h = 120)
+plot(arima_fcast)
+```
+This gives a general idea of the trend of the forecast. Further testing and model variants can be used to improve the accuracy however. 
+
+## Testing the Model 
+
+Creating a test set
+```{r}
+credit_test = window(ts(deseasonal_cnt), start = 491)
+n_test = length(credit_test)
+
+arima_train = arima(ts(deseasonal_cnt[-c(491:613)]), order = c(2,2,8))
+fcast_train = forecast(arima_train, h = n_test)
+plot(fcast_train, main = '')
+accuracy(object = fcast_train, x = credit_test)
+```
+This results in a very high MAPE value for test, and low for train. A few things need to be changed:
+
+
+
+
+First, does adding seasonality back in improve predictive accuracy?
+```{r}
+arima_seasonal = auto.arima(ts(deseasonal_cnt[-c(491:613)]), seasonal = TRUE, D = 1, allowdrift = TRUE, allowmean = TRUE)
+seasonal_fcast = forecast(arima_seasonal, h = length(n_test))
+plot(seasonal_fcast)
+accuracy(object = seasonal_fcast, x = credit_test)
+```
+Accuracy is highly improved, suggesting that incorporating seasonality back into our model is beneficial (this is expected, as the financial data is highly seasonal).
+
+Using the model to predict test data:
+```{r}
+arima_seasonal_test = Arima(credit_test, model = arima_seasonal, D = 1, allowdrift = TRUE, allowmean = TRUE)
+accuracy(arima_seasonal_test)
+```
+
+MAPE levels are sufficiently low. Forecasting:
+```{r}
+final_arima = Arima(consumer_credit$clean_count, model = arima_seasonal, D = 1, allowdrift = TRUE, allowmean = TRUE)
+forecast_final = forecast(final_arima, h = 120) #forecasting 10 years into the future
+plot(forecast_final)
+summary(forecast_final)
+```
+The results seem to adhere to the trends in the data. The seasonal model created faired well when predicting the test set, as MAPE values were small. This suggests an accurate forecast.
+
+
+```{r}
+forecast_final$mean #monthly results from the forecast
+```
+
+Creating a new dataframe which combines the forecasted values with the clean data set:
+```{r}
+old_clean_data = consumer_credit
+old_clean_data = within(old_clean_data, rm('Consumer Credit', cnt_ma, cnt_ma12))
+colnames(old_clean_data) = c("Date", "Value")
+old_clean_data$Value = as.numeric(old_clean_data$Value)
+new_dates = seq(as.Date('2020-02-01'),as.Date('2030-01-01'),by = 'month')
+Results = data.frame(new_dates)
+Results$Value = forecast_final$mean
+colnames(Results) = c("Date", "Value")
+Results$Value = as.numeric(Results$Value)
+final_data = rbind(old_clean_data, Results)
+summary(final_data$Value)
+View(final_data)
+```
+A quick look at the summary of results above. Below is an overall plot of the final data, showing an upward trend in forecasted consumer credit debt for the next 10 years. 
+```{r}
+ggplot() +
+  geom_line(data = final_data, aes(x = Date, y = Value)) +
+  ylab('Credit Amount')
+```
+
+```{r}
+last_decade = final_data[final_data$Date >= "2010-01-01" & final_data$Date <= "2020-01-01",]
+par(mfrow = c(1,2))
+plot(last_decade, main = "Actual Growth 2010-2020")
+plot(Results, main = "Predicted Growth 2020-2030")
+```
+The above plot shows the predicted values being almost completely linear with very small variations. Although the trend overall seems to fit the data, some uncertainty remains on the overall shape of the growth plot. However, working with the model to compare predicted growth rates with historical ones can yield some generally beneficial information:
+
+```{r}
+a= Results$Value[120] #end of the predicition period, 2030-01-01
+b= last_decade$Value[121] #most recent measure of aggregate consumer debt in canada, 2020-01-01
+a
+b
+a/b
+```
+According to the forecast results, aggregate consumer debt in Canada is going to rise approximately 27.9% by the start of 2030. This reflects a change of $178,268,000,000. This is an increasingly worrying situation for Canadians. Debt/ net worth trends suggest that soon the average Canadian consumer will have debt amounting to 30% of their net worth, quickly reaching levels that are unsustainable in the event of volatile economic conditions.
+
+
+
